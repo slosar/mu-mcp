@@ -28,6 +28,29 @@ def test_search_uses_json_bounded_results_and_hides_path(monkeypatch):
     assert "--maxnum" in seen[0] and "5" in seen[0]
 
 
+def test_search_normalizes_mu_110_colon_keys_and_contacts(monkeypatch):
+    result = [{
+        ":subject": "Impedance test", ":from": [{":name": "A Person", ":email": "a@example.com"}],
+        ":date": [2025, 4, 9], ":message-id": "m@example.com", ":flags": ["unread"],
+        ":path": "/mail/message",
+    }]
+    client, _ = client_with(monkeypatch, json.dumps(result))
+    assert client.search("impedance") == [{
+        "subject": "Impedance test", "from": "A Person <a@example.com>",
+        "date": "2025-04-09", "message_id": "m@example.com", "flags": "unread",
+    }]
+
+
+def test_search_normalizes_mu_timestamp_date(monkeypatch):
+    client, _ = client_with(monkeypatch, json.dumps([{":date": [1_700_000_000, 0, 0]}]))
+    assert client.search("impedance")[0]["date"] == "2023-11-14T22:13:20+00:00"
+
+
+def test_search_normalizes_mu_emacs_time_date(monkeypatch):
+    client, _ = client_with(monkeypatch, json.dumps([{":date": [27241, 12345, 100000]}]))
+    assert client.search("impedance")[0]["date"] == "2026-07-28T22:42:01.100000+00:00"
+
+
 def test_empty_result_exit_code_is_success(monkeypatch):
     client, _ = client_with(monkeypatch, "", returncode=2)
     assert client.search("from:nobody") == []
@@ -54,7 +77,7 @@ def test_subprocess_failure_is_bounded_and_reported(monkeypatch):
 
 
 def test_read_uses_result_path_and_truncates_body(monkeypatch):
-    result = json.dumps([{"subject": "Notes", "path": "file:///mail/notes", "message-id": "m1"}])
+    result = json.dumps([{":subject": "Notes", ":path": "file:///mail/notes", ":message-id": "m1"}])
     client, seen = client_with(monkeypatch, result)
     def run(command, **kwargs):
         seen.append(command)

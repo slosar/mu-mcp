@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -107,14 +107,53 @@ class MuClient:
         }
         result: dict[str, Any] = {}
         for source, target in aliases.items():
-            if source in item and target not in result:
-                result[target] = item[source]
+            # mu 1.10 encodes its property names with a leading colon (for
+            # example, ":subject" and ":message-id"). Accept unprefixed
+            # names too for compatibility with other mu versions/wrappers.
+            key = f":{source}" if f":{source}" in item else source
+            if key in item and target not in result:
+                result[target] = MuClient._normalize_field(target, item[key])
         # Resolve only the file URI/path emitted by mu. It is never accepted
         # as caller-controlled input.
-        path = item.get("path")
+        path = item.get(":path", item.get("path"))
         if include_path and isinstance(path, str):
             result["_mu_path"] = path
         return result
+
+    @staticmethod
+    def _normalize_field(name: str, value: Any) -> Any:
+        """Turn mu's JSON-LD-ish list values and contact objects into usable metadata."""
+        if name in {"from", "to", "cc"} and isinstance(value, list):
+            contacts = []
+            for contact in value:
+                if isinstance(contact, dict):
+                    email = contact.get(":email", contact.get("email", ""))
+                    display = contact.get(":name", contact.get("name", ""))
+                    contacts.append(f"{display} <{email}>" if display and email else email or display)
+                else:
+                    contacts.append(contact)
+            return contacts[0] if len(contacts) == 1 else contacts
+        if isinstance(value, list):
+            if name == "date" and len(value) >= 2 and all(isinstance(part, int) for part in value):
+                # mu 1.10 emits Emacs-style time [high, low, microseconds];
+                # newer releases also provide Unix timestamps. Some wrappers
+                # use the conventional [year, month, day] representation.
+                if len(value) == 3 and 1000 <= value[0] <= 9999 and 1 <= value[1] <= 12 and 1 <= value[2] <= 31:
+                    return f"{value[0]:04d}-{value[1]:02d}-{value[2]:02d}"
+                if value[0] > 100_000:
+                    try:
+                        return datetime.fromtimestamp(value[0], timezone.utc).isoformat()
+                    except (OverflowError, OSError, ValueError):
+                        pass
+                if 0 <= value[0] <= 65_535 and 0 <= value[1] <= 65_535:
+                    seconds = value[0] * 65_536 + value[1]
+                    micros = value[2] if len(value) >= 3 else 0
+                    try:
+                        return datetime.fromtimestamp(seconds + micros / 1_000_000, timezone.utc).isoformat()
+                    except (OverflowError, OSError, ValueError):
+                        pass
+            return value[0] if len(value) == 1 else value
+        return value
 
     def read(self, query: str, max_chars: int = 12_000) -> dict[str, Any]:
         """Read one matching message. Query syntax is mu's query language."""
