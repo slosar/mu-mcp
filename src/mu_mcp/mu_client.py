@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -34,9 +34,12 @@ class MuClient:
 
     def _run(self, *args: str, max_output: int | None = None) -> str:
         command = [self.executable, "--quiet", "--nocolor"]
-        if self.muhome:
-            command.extend(["--muhome", self.muhome])
         command.extend(args)
+        env = {**os.environ, "NO_COLOR": "1"}
+        if self.muhome:
+            # MUHOME works across mu versions; newer versions scope --muhome
+            # to each subcommand instead of accepting it as a global option.
+            env["MUHOME"] = self.muhome
         try:
             result = subprocess.run(
                 command,
@@ -46,7 +49,7 @@ class MuClient:
                 encoding="utf-8",
                 errors="replace",
                 timeout=self.timeout,
-                env={**os.environ, "NO_COLOR": "1"},
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise MuError(f"mu command timed out after {self.timeout:g} seconds") from exc
@@ -107,6 +110,8 @@ class MuClient:
         }
         result: dict[str, Any] = {}
         for source, target in aliases.items():
+            if source == "date":
+                continue
             # mu 1.10 encodes its property names with a leading colon (for
             # example, ":subject" and ":message-id"). Accept unprefixed
             # names too for compatibility with other mu versions/wrappers.
@@ -118,10 +123,22 @@ class MuClient:
         path = item.get(":path", item.get("path"))
         if include_path and isinstance(path, str):
             result["_mu_path"] = path
+        unix_date = item.get(":date-unix", item.get("date-unix"))
+        offset = item.get(":utc-offset", item.get("utc-offset", 0))
+        if not isinstance(offset, int) or abs(offset) >= 24 * 60 * 60:
+            offset = 0
+        if isinstance(unix_date, (int, float)) and not isinstance(unix_date, bool):
+            result["date"] = datetime.fromtimestamp(
+                unix_date, timezone(timedelta(seconds=offset))
+            ).isoformat()
+        else:
+            date_value = item.get(":date", item.get("date"))
+            if date_value is not None:
+                result["date"] = MuClient._normalize_field("date", date_value, offset)
         return result
 
     @staticmethod
-    def _normalize_field(name: str, value: Any) -> Any:
+    def _normalize_field(name: str, value: Any, utc_offset: int = 0) -> Any:
         """Turn mu's JSON-LD-ish list values and contact objects into usable metadata."""
         if name in {"from", "to", "cc"} and isinstance(value, list):
             contacts = []
@@ -142,14 +159,20 @@ class MuClient:
                     return f"{value[0]:04d}-{value[1]:02d}-{value[2]:02d}"
                 if value[0] > 100_000:
                     try:
-                        return datetime.fromtimestamp(value[0], timezone.utc).isoformat()
+                        seconds = value[0] + (value[1] / 1_000_000 if len(value) > 1 else 0)
+                        return datetime.fromtimestamp(
+                            seconds, timezone(timedelta(seconds=utc_offset))
+                        ).isoformat()
                     except (OverflowError, OSError, ValueError):
                         pass
                 if 0 <= value[0] <= 65_535 and 0 <= value[1] <= 65_535:
                     seconds = value[0] * 65_536 + value[1]
                     micros = value[2] if len(value) >= 3 else 0
                     try:
-                        return datetime.fromtimestamp(seconds + micros / 1_000_000, timezone.utc).isoformat()
+                        return datetime.fromtimestamp(
+                            seconds + micros / 1_000_000,
+                            timezone(timedelta(seconds=utc_offset)),
+                        ).isoformat()
                     except (OverflowError, OSError, ValueError):
                         pass
             return value[0] if len(value) == 1 else value

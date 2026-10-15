@@ -46,9 +46,25 @@ def test_search_normalizes_mu_timestamp_date(monkeypatch):
     assert client.search("impedance")[0]["date"] == "2023-11-14T22:13:20+00:00"
 
 
+def test_search_prefers_mu_unix_timestamp_and_timezone(monkeypatch):
+    client, _ = client_with(monkeypatch, json.dumps([{":date": [0, 0, 0], ":date-unix": 1_700_000_000, ":utc-offset": 3600}]))
+    assert client.search("impedance")[0]["date"] == "2023-11-14T23:13:20+01:00"
+
+
 def test_search_normalizes_mu_emacs_time_date(monkeypatch):
     client, _ = client_with(monkeypatch, json.dumps([{":date": [27241, 12345, 100000]}]))
     assert client.search("impedance")[0]["date"] == "2026-07-28T22:42:01.100000+00:00"
+
+
+def test_muhome_is_passed_through_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        "mu_mcp.mu_client.subprocess.run",
+        lambda command, **kwargs: (seen.update(command=command, env=kwargs["env"]) or subprocess.CompletedProcess(command, 0, "", "")),
+    )
+    MuClient(executable="/usr/bin/mu", muhome="/tmp/mu-home")._run("info")
+    assert "--muhome" not in seen["command"]
+    assert seen["env"]["MUHOME"] == "/tmp/mu-home"
 
 
 def test_empty_result_exit_code_is_success(monkeypatch):
